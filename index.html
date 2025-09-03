@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Malha Rodoviária (meta.csv)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    #map { height: 100vh; }
+    .leaflet-control-attribution { font-size: 11px; }
+    .rod-label.stacked {
+      font: 700 12px/1.1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: #111;
+      text-shadow: 0 0 2px rgba(255,255,255,.9), 0 0 6px rgba(255,255,255,.9);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- PapaParse para CSV -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" integrity="sha256-b6rwZJw/0g0cJPXVhMm12KxxJ1f9F16jMn1Z9+QHcRg=" crossorigin="anonymous"></script>
+  <!-- Leaflet -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+
+  <!-- ===== MALHA RODOVIÁRIA FIXA (meta.csv) ===== -->
+  <script>
+  (function() {
+    function sanitizarCSV(csvText) {
+      const lines = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+      if (!lines.length) return csvText;
+      const header = lines[0];
+      const fixed = [header];
+      for (let i = 1; i < lines.length; i++) {
+        let s = lines[i].trim();
+        if (!s) continue;
+        if (s.startsWith('"') && s.endsWith('"')) {
+          s = s.slice(1, -1).replace(/""/g, '"');
+        }
+        fixed.push(s);
+      }
+      return fixed.join('\n');
+    }
+    function parseDecComma(str) {
+      if (str == null) return NaN;
+      const s = String(str).trim().replace(/\./g, '').replace(',', '.');
+      const n = parseFloat(s);
+      return Number.isFinite(n) ? n : NaN;
+    }
+    function corHslDaString(seed) {
+      let h = 0;
+      for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
+      return `hsl(${h}, 70%, 48%)`;
+    }
+    function midpoint(a, b) { return [(a[0]+b[0])/2, (a[1]+b[1])/2]; }
+
+    async function carregarMalhaMeta() {
+      try {
+        const resp = await fetch('./meta.csv', { cache: 'no-store' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        let csvText = await resp.text();
+        csvText = sanitizarCSV(csvText);
+        return new Promise((resolve) => {
+          Papa.parse(csvText, {
+            header: true, skipEmptyLines: true,
+            complete: ({ data }) => {
+              const trechosPorRodovia = {};
+              data.forEach(row => {
+                const rodovia = (row['Rodovia'] || '').toString().trim();
+                if (!rodovia) return;
+                const kmInicial = parseDecComma(row['Km Inicial']);
+                const kmFinal   = parseDecComma(row['Km Final']);
+                const ci = (row['Lat e Long km Inicial'] || '').split(',');
+                const cf = (row['Lat e Long km final']   || '').split(',');
+                const latI = parseFloat((ci[0] || '').trim());
+                const lngI = parseFloat((ci[1] || '').trim());
+                const latF = parseFloat((cf[0] || '').trim());
+                const lngF = parseFloat((cf[1] || '').trim());
+                if (![latI,lngI,latF,lngF].every(Number.isFinite)) return;
+                (trechosPorRodovia[rodovia] ||= []).push({
+                  rodovia, kmInicial, kmFinal,
+                  coordInicial: [latI, lngI],
+                  coordFinal:   [latF, lngF]
+                });
+              });
+              Object.values(trechosPorRodovia).forEach(lista => {
+                lista.sort((a,b) => (a.kmInicial ?? 0) - (b.kmInicial ?? 0));
+              });
+              resolve(trechosPorRodovia);
+            }
+          });
+        });
+      } catch (e) { console.error('❌ Erro ao carregar meta.csv:', e); return {}; }
+    }
+
+    function desenharMalha(trechosPorRodovia) {
+      // Mapa básico
+      const mapa = L.map('map', { preferCanvas: true }).setView([-23.5, -47.5], 8);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '&copy; OpenStreetMap'
+      }).addTo(mapa);
+
+      // Pane para malha
+      if (!mapa.getPane('malhaPane')) {
+        mapa.createPane('malhaPane');
+        mapa.getPane('malhaPane').style.zIndex = 450;
+      }
+
+      const group = L.layerGroup([], { pane: 'malhaPane' });
+      const bounds = L.latLngBounds();
+      const labelMarkers = [];
+
+      Object.entries(trechosPorRodovia).forEach(([rodovia, trechos]) => {
+        const cor = corHslDaString(rodovia);
+        let somaLat = 0, somaLng = 0, cont = 0;
+        trechos.forEach((t, idx) => {
+          const latlngs = [t.coordInicial, t.coordFinal];
+          const linha = L.polyline(latlngs, { color: cor, weight: 5, opacity: 0.9, lineJoin: 'round' })
+            .bindPopup(`<b>${rodovia}</b><br>${Number.isFinite(t.kmInicial)&&Number.isFinite(t.kmFinal) ? `Km ${t.kmInicial.toFixed(3)} – ${t.kmFinal.toFixed(3)}` : `Trecho ${idx+1}`}`);
+          group.addLayer(linha);
+          bounds.extend(latlngs[0]).extend(latlngs[1]);
+          const mid = midpoint(latlngs[0], latlngs[1]); somaLat += mid[0]; somaLng += mid[1]; cont++;
+        });
+        if (cont > 0) {
+          const centro = [somaLat/cont, somaLng/cont];
+          labelMarkers.push(L.marker(centro, { interactive: false, pane: 'malhaPane',
+            icon: L.divIcon({ className: 'rod-label stacked', html: rodovia }) }));
+        }
+      });
+
+      const labelsGroup = L.layerGroup(labelMarkers, { pane: 'malhaPane' });
+      const malhaGroup = L.layerGroup([group, labelsGroup]).addTo(mapa);
+
+      L.control.layers(null, { 'Malha Rodoviária (meta.csv)': malhaGroup }, { collapsed: true }).addTo(mapa);
+
+      if (bounds.isValid()) mapa.fitBounds(bounds.pad(0.05));
+    }
+
+    carregarMalhaMeta().then(desenharMalha);
+  })();
+  </script>
+  <!-- ===== FIM MALHA RODOVIÁRIA ===== -->
+</body>
+</html>
