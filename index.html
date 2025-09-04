@@ -273,5 +273,67 @@
   })();
   </script>
   <!-- ===== FIM MALHA RODOVIÁRIA — OSRM ===== -->
+  <!-- shpjs para ler Shapefile .zip no navegador -->
+<script src="https://unpkg.com/shpjs@4.0.4/dist/shp.min.js"></script>
+
+<script>
+(function () {
+  // 🔧 Se você colocar os zips em outra pasta (ex.: "rc/"), ajuste os paths aqui:
+  const RC_LIST = [
+    { name: 'RC 2.1', path: './RC_2.1.zip' },
+    { name: 'RC 2.2', path: './RC_2.2.zip' },
+    { name: 'RC 2.4', path: './RC_2.4.zip' },
+    { name: 'RC 2.5', path: './RC_2.5.zip' },
+    { name: 'RC 2.6/2.8', path: './RC_2.6_2.8.zip' },
+    { name: 'RC 2.7', path: './RC_2.7.zip' },
+  ];
+
+  function styleRC() {
+    return { color: '#9CA3AF', weight: 1, opacity: 0.8, fillColor: '#E5E7EB', fillOpacity: 0.25 };
+  }
+
+  function waitForMap() {
+    return new Promise((resolve) => {
+      (function poll() {
+        if (window.mapa && typeof window.mapa.addLayer === 'function') return resolve(window.mapa);
+        setTimeout(poll, 80);
+      })();
+    });
+  }
+
+  async function addRC() {
+    const mapa = await waitForMap();
+
+    // Pane para ficar no fundo, abaixo das rotas
+    if (!mapa.getPane('rcPane')) {
+      mapa.createPane('rcPane');
+      mapa.getPane('rcPane').style.zIndex = 300; // rotas estão por volta de 450
+    }
+
+    const overlays = {};
+    for (const item of RC_LIST) {
+      try {
+        const resp = await fetch(item.path, { cache: 'no-store' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const ab = await resp.arrayBuffer();
+        const gj = await shp.parseZip(ab); // FeatureCollection GeoJSON
+        const layer = L.geoJSON(gj, { pane: 'rcPane', style: styleRC }).addTo(mapa);
+        overlays['RC: ' + item.name] = layer;
+      } catch (e) {
+        console.error('Falha ao carregar', item.name, e);
+      }
+    }
+
+    // Se já existe Layer Control (criado pela malha), só adiciona os overlays
+    if (window._layersControl) {
+      Object.entries(overlays).forEach(([nome, layer]) => window._layersControl.addOverlay(layer, nome));
+    } else {
+      L.control.layers(null, overlays, { collapsed: true }).addTo(mapa);
+    }
+  }
+
+  addRC();
+})();
+</script>
 </body>
 </html>
