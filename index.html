@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Malha — OSRM + RC Simplificado</title>
+  <link rel="icon" href="data:;base64,=">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    #map { height: 100vh; }
+    .leaflet-control-attribution { font-size: 11px; }
+    .rod-label.stacked {
+      font: 700 12px/1.1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: #111;
+      text-shadow: 0 0 2px rgba(255,255,255,.9), 0 0 6px rgba(255,255,255,.9);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .legend {
+      position:absolute; z-index:1000; bottom:12px; left:10px;
+      background:rgba(255,255,255,.9); border-radius:10px; padding:8px 12px;
+      font:500 12px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      box-shadow:0 2px 10px rgba(0,0,0,.08); max-width:380px;
+    }
+    .legend label { display:flex; align-items:center; gap:8px; cursor:pointer; }
+    .status {
+      position:absolute; z-index:1000; top:10px; left:10px;
+      background:rgba(255,255,255,.9); border-radius:10px; padding:8px 12px;
+      font:500 13px system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      box-shadow:0 2px 10px rgba(0,0,0,.08); display:none;
+    }
+    .status .bar { height:6px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:6px; }
+    .status .bar > div { height:100%; width:0%; background:#4f46e5; transition:width .2s linear; }
+    .status code { background:#f2f2f2; padding:1px 4px; border-radius:4px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="legend">
+    <div style="margin-bottom:6px"><strong>RC simplificado</strong> — tolerância <code id="tolVal">0.0005°</code> • <small>(~55 m)</small></div>
+    <input id="tol" type="range" min="0.00005" max="0.003" step="0.00005" value="0.0005" style="width:240px">
+    <button id="btnRedesenhar" style="margin-left:8px;">Redesenhar</button>
+    <div style="margin-top:8px">
+      <label>
+        <input type="checkbox" id="toggleRoute" checked>
+        Usar rota real (OSRM). Desmarque para linhas retas.
+      </label>
+    </div>
+  </div>
+
+  <div class="status" id="status">
+    <div><strong>Roteando</strong> trechos via <code>OSRM</code>: <span id="prog">0/0</span></div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="msg" style="margin-top:6px;color:#6b7280"></div>
+  </div>
+
+  <!-- libs -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script>if(typeof Papa==='undefined'){var s=document.createElement('script');s.src='https://unpkg.com/papaparse@5.4.1/papaparse.min.js';document.head.appendChild(s);}</script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/proj4@2.9.0/dist/proj4.js"></script>
+  <script src="https://unpkg.com/shpjs@4.0.4/dist/shp.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+  <script>
+  (function() {
+    const RC_LIST = [
+      { name: 'RC_2.1', path: './RC_2.1.zip' },
+      { name: 'RC_2.2', path: './RC_2.2.zip' },
+      { name: 'RC_2.4', path: './RC_2.4.zip' },
+      { name: 'RC_2.5', path: './RC_2.5.zip' },
+      { name: 'RC_2.6_2.8', path: './RC_2.6_2.8.zip' },
+      { name: 'RC_2.7', path: './RC_2.7.zip' }
+    ];
+
+    const statusBox=document.getElementById('status'), progSpan=document.getElementById('prog'), barDiv=document.getElementById('bar'), msgDiv=document.getElementById('msg');
+    const chkRoute=document.getElementById('toggleRoute');
+    const tolInput=document.getElementById('tol'), tolVal=document.getElementById('tolVal'), btnRed=document.getElementById('btnRedesenhar');
+
+    const USE_CACHE=true, OSRM_URL='https://router.project-osrm.org/route/v1/driving/', CONCURRENCY=3;
+
+    function setStatus(d,t,m){ if(t<=0||d>=t){statusBox.style.display='none';return;} statusBox.style.display='block'; progSpan.textContent=d+'/'+t; barDiv.style.width=((d/t)*100).toFixed(1)+'%'; msgDiv.textContent=m||''; }
+    function cor(seed){let h=0;for(let i=0;i<seed.length;i++) h=(h*31+seed.charCodeAt(i))%360; return `hsl(${h},70%,48%)`; }
+    function sanitCSV(s){const lines=s.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n'); if(!lines.length) return s; const head=lines[0], out=[head]; for(let i=1;i<lines.length;i++){let L=lines[i].trim(); if(!L) continue; if(L.startsWith('"')&&L.endsWith('"')) L=L.slice(1,-1).replace(/""/g,'"'); out.push(L);} return out.join('\n'); }
+    function decComma(x){ if(x==null) return NaN; const s=String(x).trim().replace(/\./g,'').replace(',', '.'); const n=parseFloat(s); return Number.isFinite(n)?n:NaN; }
+    function cacheKey(a,b,c,d){ return `osrm:${a.toFixed(5)},${b.toFixed(5)}|${c.toFixed(5)},${d.toFixed(5)}`; }
+    async function osrm(a,b,c,d){ const k=cacheKey(a,b,c,d); const got=USE_CACHE&&localStorage.getItem(k); if(got) try{return JSON.parse(got);}catch{} const url=`${{OSRM_URL}}${{b}},${{a}};${{d}},${{c}}?overview=full&geometries=geojson`; const r=await fetch(url); if(!r.ok) throw new Error('OSRM '+r.status); const j=await r.json(); const cc=j?.routes?.[0]?.geometry?.coordinates||null; if(!cc||!cc.length) throw new Error('OSRM sem geometria'); const latlngs=cc.map(c=>[c[1],c[0]]); if(USE_CACHE) localStorage.setItem(k, JSON.stringify(latlngs)); return latlngs; }
+
+    async function carregarMeta(){ const r=await fetch('./meta.csv',{cache:'no-store'}); if(!r.ok) throw new Error('HTTP '+r.status); let t=await r.text(); t=sanitCSV(t);
+      return new Promise(res=>{ Papa.parse(t,{ header:true, skipEmptyLines:true, complete:({data})=>{ const map={}; data.forEach(row=>{ const rod=(row['Rodovia']||'').toString().trim(); if(!rod) return; const ki=decComma(row['Km Inicial']); const kf=decComma(row['Km Final']); const ci=(row['Lat e Long km Inicial']||'').split(','); const cf=(row['Lat e Long km final']||'').split(','); const latI=parseFloat((ci[0]||'').trim()); const lngI=parseFloat((ci[1]||'').trim()); const latF=parseFloat((cf[0]||'').trim()); const lngF=parseFloat((cf[1]||'').trim()); if (![latI,lngI,latF,lngF].every(Number.isFinite)) return; (map[rod] ||= []).push({ rodovia:rod, kmInicial:ki, kmFinal:kf, coordInicial:[latI,lngI], coordFinal:[latF,lngF] }); }); Object.values(map).forEach(lst=>lst.sort((a,b)=>(a.kmInicial??0)-(b.kmInicial??0))); res(map); } }); }); }
+
+    function desenhar(trechos){ const m=L.map('map',{preferCanvas:true}).setView([-23.5,-47.5],8); window.mapa=m;
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(m);
+      if(!m.getPane('rcPane')){ m.createPane('rcPane'); m.getPane('rcPane').style.zIndex=300; }
+      if(!m.getPane('malhaPane')){ m.createPane('malhaPane'); m.getPane('malhaPane').style.zIndex=450; }
+      const bounds=L.latLngBounds(); const overlay=L.layerGroup([], {pane:'malhaPane'}).addTo(m); const labels=L.layerGroup([], {pane:'malhaPane'}).addTo(m);
+      const useRouted=()=>!chkRoute||chkRoute.checked; const stats={}; const jobs=[]; let total=0,done=0;
+      Object.entries(trechos).forEach(([rod,lst])=>{ const color=cor(rod); stats[rod]={lat:0,lng:0,c:0}; lst.forEach((t,idx)=>{ total++; jobs.push(async()=>{ let latlngs; if(useRouted()){ try{ latlngs=await osrm(t.coordInicial[0],t.coordInicial[1],t.coordFinal[0],t.coordFinal[1]); }catch(e){ console.warn('OSRM falhou, reta', e); } } if(!latlngs) latlngs=[t.coordInicial,t.coordFinal]; const line=L.polyline(latlngs,{color,weight:5,opacity:.9,lineJoin:'round'}).bindPopup(`<b>${{rod}}</b><br>${{ Number.isFinite(t.kmInicial)&&Number.isFinite(t.kmFinal) ? `Km ${{t.kmInicial.toFixed(3)}} – ${{t.kmFinal.toFixed(3)}}` : `Trecho ${{idx+1}}` }}`); overlay.addLayer(line); latlngs.forEach(ll=>bounds.extend(ll)); const mid=latlngs[Math.floor(latlngs.length/2)]; stats[rod].lat+=mid[0]; stats[rod].lng+=mid[1]; stats[rod].c++; done++; setStatus(done,total,'Trecho '+done+' concluído'); }); }); });
+      async function runQ(ts,con){ let i=0; const runners=[]; setStatus(0,total,'Iniciando...'); for(let k=0;k<Math.min(con,ts.length);k++) runners.push((async function run(){ while(i<ts.length){ const j=i++; await ts[j](); } })()); await Promise.all(runners); }
+      runQ(jobs,CONCURRENCY).then(()=>{ Object.entries(stats).forEach(([rod,st])=>{ if(st.c>0) labels.addLayer(L.marker([st.lat/st.c, st.lng/st.c],{interactive:false,pane:'malhaPane',icon:L.divIcon({className:'rod-label stacked', html:rod})})); }); setStatus(total,total); if(bounds.isValid()) m.fitBounds(bounds.pad(0.05)); });
+      window._layersControl=L.control.layers(null,{{'Malha Rodoviária (meta.csv)':L.layerGroup([overlay,labels])}},{{collapsed:true}}).addTo(m);
+      chkRoute && chkRoute.addEventListener('change', ()=>location.reload());
+    }
+
+    // RC loader + simplificação
+    let rcLayers=[];
+    function clearRC(m){ rcLayers.forEach(l=>m.removeLayer(l)); rcLayers=[]; }
+    async function addRC(){ const m=window.mapa; if(!m) return; if(!m.getPane('rcPane')){ m.createPane('rcPane'); m.getPane('rcPane').style.zIndex=300; } clearRC(m);
+      const overlays={{}}; const tol=parseFloat(tolInput.value||'0.0005'); tolVal.textContent = tol.toFixed(4)+'°';
+      for(const item of RC_LIST){ try{ console.log('[RC] carregando', item.name, '→', item.path); const resp=await fetch(item.path,{cache:'no-store'}); if(!resp.ok) throw new Error('HTTP '+resp.status); const ab=await resp.arrayBuffer(); const gj=await shp.parseZip(ab); const simp=turf.simplify(gj,{tolerance:tol,highQuality:false,mutate:false}); const layer=L.geoJSON(simp,{pane:'rcPane', style:{color:'#4B5563',weight:2,opacity:.6,fillColor:'#9CA3AF',fillOpacity:.15}, interactive:false}).addTo(m); rcLayers.push(layer); overlays['RC: '+item.name]=layer; } catch(e){ console.error('[RC] falhou', item.name, e); } }
+      if(window._layersControl){ Object.entries(overlays).forEach(([n,l])=>window._layersControl.addOverlay(l,n)); } else if(Object.keys(overlays).length){ L.control.layers(null, overlays, {collapsed:true}).addTo(m); }
+    }
+
+    (async function main(){ try{ const trechos=await carregarMeta(); desenhar(trechos); await addRC(); btnRed && btnRed.addEventListener('click', addRC); }catch(e){ alert('Falha ao iniciar (veja console).'); console.error(e); } })();
+  })();
+  </script>
+</body>
+</html>
