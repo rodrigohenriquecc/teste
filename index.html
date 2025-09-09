@@ -94,7 +94,7 @@
     }
 
     function sanitCSV(s) {
-      const lines = s.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n').split('\\n');
+      const lines = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
       if (!lines.length) return s;
       const out = [lines[0]];
       for (let i = 1; i < lines.length; i++) {
@@ -103,14 +103,33 @@
         if (L.startsWith('"') && L.endsWith('"')) L = L.slice(1, -1).replace(/""/g, '"');
         out.push(L);
       }
-      return out.join('\\n');
+      return out.join('\n');
     }
 
     function decComma(x) {
       if (x == null) return NaN;
-      const s = String(x).trim().replace(/\\./g, '').replace(',', '.');
+      const s = String(x).trim().replace(/\./g, '').replace(',', '.');
       const n = parseFloat(s);
       return Number.isFinite(n) ? n : NaN;
+    }
+
+    function pick(row, names) {
+      for (const n of names) {
+        if (row.hasOwnProperty(n) and row[n] != null and String(row[n]).trim() !== '') return row[n];
+      }
+      return null;
+    }
+
+    function parseCoord(raw) {
+      if (!raw) return null;
+      let s = String(raw);
+      s = s.replace(/[()\\[\\]]/g,' ').replace(/Lat\\.?|Long\\.?|Lon\\.?/gi,' ').replace(/;/g,',');
+      const m = s.match(/[-+]?\\d+(?:[\\.,]\\d+)?/g);
+      if (!m || m.length < 2) return null;
+      const lat = decComma(m[0]);
+      const lng = decComma(m[1]);
+      if (![lat,lng].every(Number.isFinite)) return null;
+      return [lat, lng];
     }
 
     function cacheKey(a,b,c,d) {
@@ -146,25 +165,28 @@
         Papa.parse(t, {
           header: true,
           skipEmptyLines: true,
-          complete: ({ data }) => {
+          delimiter: "", // auto-detect
+          complete: ({ data, meta, errors }) => {
             const map = {};
+            let totalLinhas = 0, totalValidas = 0;
             data.forEach(row => {
-              const rod = (row['Rodovia'] || '').toString().trim();
+              totalLinhas++;
+              const rod = (pick(row, ['Rodovia','rodovia']) || '').toString().trim();
               if (!rod) return;
-              const ki = decComma(row['Km Inicial']);
-              const kf = decComma(row['Km Final']);
-              const ci = (row['Lat e Long km Inicial'] || '').split(',');
-              const cf = (row['Lat e Long km final']   || '').split(',');
-              const latI = parseFloat((ci[0] || '').trim());
-              const lngI = parseFloat((ci[1] || '').trim());
-              const latF = parseFloat((cf[0] || '').trim());
-              const lngF = parseFloat((cf[1] || '').trim());
-              if (![latI,lngI,latF,lngF].every(Number.isFinite)) return;
+              const ki = decComma(pick(row, ['Km Inicial','km inicial','Km inicial','KmInicial','KM Inicial']));
+              const kf = decComma(pick(row, ['Km Final','km final','Km final','KmFinal','KM Final']));
+              const sI = pick(row, ['Lat e Long km Inicial','Lat e Long km inicial','Lat e Long km INICIAL','Lat e Long km inicial ']);
+              const sF = pick(row, ['Lat e Long km Final','Lat e Long km final','Lat e Long km FINAL','Lat e Long km final ']);
+              const ci = parseCoord(sI);
+              const cf = parseCoord(sF);
+              if (!ci || !cf) return;
               (map[rod] || (map[rod] = [])).push({
                 rodovia: rod, kmInicial: ki, kmFinal: kf,
-                coordInicial: [latI, lngI], coordFinal: [latF, lngF]
+                coordInicial: ci, coordFinal: cf
               });
+              totalValidas++;
             });
+            console.log('[META] linhas:', totalLinhas, '| trechos válidos:', totalValidas, '| rodovias:', Object.keys(map).length);
             Object.values(map).forEach(lst => lst.sort((a,b) => (a.kmInicial || 0) - (b.kmInicial || 0)));
             resolve(map);
           }
@@ -188,7 +210,11 @@
       const stats = {}, jobs = [];
       let total = 0, done = 0;
 
-      Object.entries(trechos).forEach(([rod, lst]) => {
+      const entries = Object.entries(trechos);
+      if (!entries.length) {
+        console.warn('[META] Nenhum trecho foi interpretado. Verifique cabeçalhos/formatos no meta.csv.');
+      }
+      entries.forEach(([rod, lst]) => {
         const color = cor(rod);
         stats[rod] = { lat: 0, lng: 0, c: 0 };
         lst.forEach((t, idx) => {
