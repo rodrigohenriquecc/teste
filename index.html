@@ -11,8 +11,7 @@
     #map { height: 100vh; }
     .rod-label.stacked {
       font: 700 12px/1.1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      color: #111;
-      text-shadow: 0 0 2px rgba(255,255,255,.9), 0 0 6px rgba(255,255,255,.9);
+      color: #111; text-shadow: 0 0 2px rgba(255,255,255,.9), 0 0 6px rgba(255,255,255,.9);
       white-space: nowrap; pointer-events: none;
     }
     .panel {
@@ -47,6 +46,7 @@
     <div id="msg" style="margin-top:6px;color:#6b7280"></div>
   </div>
 
+  <!-- libs -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script>if(typeof Papa==='undefined'){var s=document.createElement('script');s.src='https://unpkg.com/papaparse@5.4.1/papaparse.min.js';document.head.appendChild(s);}</script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -55,6 +55,7 @@
 
   <script>
   (function(){
+    // ==== LISTA DOS RC (coloque aqui os que você tiver na pasta) ====
     const RC_LIST = [
       { name: 'RC_2.1', path: './RC_2.1.zip' },
       { name: 'RC_2.2', path: './RC_2.2.zip' },
@@ -63,11 +64,13 @@
       { name: 'RC_2.6_2.8', path: './RC_2.6_2.8.zip' },
       { name: 'RC_2.7', path: './RC_2.7.zip' }
     ];
-    const TOL = 0.0001;
+
+    const TOL = 0.0001; // simplificação fixa
     const USE_CACHE = true;
     const OSRM_URL  = 'https://router.project-osrm.org/route/v1/driving/';
     const CONCURRENCY = 3;
 
+    // ==== UI ====
     const statusBox = document.getElementById('status');
     const progSpan  = document.getElementById('prog');
     const barDiv    = document.getElementById('bar');
@@ -88,6 +91,33 @@
       return 'hsl(' + h + ',70%,48%)';
     }
 
+    // --------- PARSE NÚMEROS ROBUSTO (pt-BR e en-US) ---------
+    function toNumberBR(val) {
+      if (val == null) return NaN;
+      let s = String(val).trim();
+      s = s.replace(/[^\d,\.\-+]/g, '');       // mantém dígitos, sinais e separadores
+      const hasComma = s.includes(',');
+      const hasDot   = s.includes('.');
+      if (hasComma && hasDot) {
+        // define decimal pelo separador que aparece por último
+        if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+          s = s.replace(/\./g, '').replace(',', '.');
+        } else {
+          s = s.replace(/,/g, '');
+        }
+      } else if (hasComma) {
+        s = s.replace(/\./g, '').replace(',', '.');
+      } // se só tem ponto ou nenhum, mantém
+      let n = parseFloat(s);
+      if (!Number.isFinite(n)) return NaN;
+      // normaliza micrograus (ex: -47570500 -> -47.5705)
+      if (Math.abs(n) > 180) {
+        if (Math.abs(n) <= 180000000) n = n / 1e6;
+        else if (Math.abs(n) <= 1800000) n = n / 1e4;
+      }
+      return n;
+    }
+
     function sanitCSV(s) {
       const lines = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
       if (!lines.length) return s;
@@ -101,13 +131,6 @@
       return out.join('\n');
     }
 
-    function decComma(x) {
-      if (x == null) return NaN;
-      const s = String(x).trim().replace(/\./g, '').replace(',', '.');
-      const n = parseFloat(s);
-      return Number.isFinite(n) ? n : NaN;
-    }
-
     function pick(row, names) {
       for (const n of names) {
         if (Object.prototype.hasOwnProperty.call(row, n) && row[n] != null && String(row[n]).trim() !== '') return row[n];
@@ -115,23 +138,33 @@
       return null;
     }
 
+    // Extrai [lat,lng] de string em vários formatos
     function parseCoord(raw) {
       if (!raw) return null;
       let s = String(raw).trim();
       s = s.replace(/[()\[\]]/g,' ').replace(/Lat\.?|Latitude|Long\.?|Longitude|Lon\.?/gi,' ').replace(/[;|]/g,',');
       const m = s.match(/[-+]?\d+(?:[\.,]\d+)?/g);
       if (!m || m.length < 2) return null;
-      const lat = decComma(m[0]);
-      const lng = decComma(m[1]);
-      if (![lat,lng].every(Number.isFinite)) return null;
+      let lat = toNumberBR(m[0]);
+      let lng = toNumberBR(m[1]);
+      // se invertido (Brasil: |lat|<40, |lng|>40), tenta corrigir
+      if (!(Math.abs(lat) <= 90 && Math.abs(lng) <= 180) && (Math.abs(lng) <= 90 && Math.abs(lat) <= 180)) {
+        const tmp = lat; lat = lng; lng = tmp;
+      }
+      // última validação
+      if (!(Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) return null;
       return [lat, lng];
     }
 
     function cacheKey(a,b,c,d) {
-      return 'osrm:' + a.toFixed(5) + ',' + b.toFixed(5) + '|' + c.toFixed(5) + ',' + d.toFixed(5);
+      return 'osrm:' + a.toFixed(6) + ',' + b.toFixed(6) + '|' + c.toFixed(6) + ',' + d.toFixed(6);
     }
 
     async function osrm(a,b,c,d) {
+      // OSRM requer lat dentro de ~[-85,85]
+      if (!(Math.abs(a) <= 85 && Math.abs(c) <= 85 && Math.abs(b) <= 180 && Math.abs(d) <= 180)) {
+        throw new Error('coord fora de faixa OSRM');
+      }
       const k = cacheKey(a,b,c,d);
       if (USE_CACHE) {
         const got = localStorage.getItem(k);
@@ -141,12 +174,10 @@
       const r = await fetch(url);
       if (!r.ok) throw new Error('OSRM ' + r.status);
       const j = await r.json();
-      let coords = null;
-      if (j && j.routes && j.routes[0] && j.routes[0].geometry && j.routes[0].geometry.coordinates) {
-        coords = j.routes[0].geometry.coordinates;
+      if (!(j && j.routes && j.routes[0] && j.routes[0].geometry && j.routes[0].geometry.coordinates)) {
+        throw new Error('OSRM sem geometria');
       }
-      if (!coords || !coords.length) throw new Error('OSRM sem geometria');
-      const latlngs = coords.map(c => [c[1], c[0]]);
+      const latlngs = j.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
       if (USE_CACHE) localStorage.setItem(k, JSON.stringify(latlngs));
       return latlngs;
     }
@@ -168,16 +199,15 @@
               totalLinhas++;
               const rod = (pick(row, ['Rodovia','rodovia']) || '').toString().trim();
               if (!rod) return;
-              const ki = decComma(pick(row, ['Km Inicial','km inicial','Km inicial','KmInicial','KM Inicial']));
-              const kf = decComma(pick(row, ['Km Final','km final','Km final','KmFinal','KM Final']));
+              const ki = toNumberBR(pick(row, ['Km Inicial','km inicial','Km inicial','KmInicial','KM Inicial']));
+              const kf = toNumberBR(pick(row, ['Km Final','km final','Km final','KmFinal','KM Final']));
               const sI = pick(row, ['Lat e Long km Inicial','Lat e Long km inicial','Lat e Long km INICIAL','Lat e Long km inicial ']);
               const sF = pick(row, ['Lat e Long km Final','Lat e Long km final','Lat e Long km FINAL','Lat e Long km final ']);
               const ci = parseCoord(sI);
               const cf = parseCoord(sF);
               if (!ci || !cf) { console.warn('[META] linha ignorada por coordenadas inválidas:', row); return; }
               (map[rod] || (map[rod] = [])).push({
-                rodovia: rod, kmInicial: ki, kmFinal: kf,
-                coordInicial: ci, coordFinal: cf
+                rodovia: rod, kmInicial: ki, kmFinal: kf, coordInicial: ci, coordFinal: cf
               });
               totalValidas++;
             });
@@ -190,7 +220,7 @@
     }
 
     function desenhar(trechos) {
-      const m = L.map('map', { preferCanvas: true }).setView([-23.5, -47.5], 8);
+      const m = L.map('map', { preferCanvas: true }).setView([-22.9, -47.0], 7);
       window.mapa = m;
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(m);
       if (!m.getPane('rcPane'))    { m.createPane('rcPane');    m.getPane('rcPane').style.zIndex = 300; }
@@ -215,13 +245,14 @@
         lst.forEach((t, idx) => {
           total++;
           jobs.push(async () => {
-            let latlngs;
+            let latlngs = null;
             if (useRouted()) {
               try { latlngs = await osrm(t.coordInicial[0], t.coordInicial[1], t.coordFinal[0], t.coordFinal[1]); }
               catch (e) { console.warn('OSRM falhou, reta:', e); }
             }
             if (!latlngs) latlngs = [t.coordInicial, t.coordFinal];
-            latlngs = latlngs.filter(ll => Array.isArray(ll) && ll.length===2 && ll.every(Number.isFinite));
+            // filtra qualquer ponto fora de faixa
+            latlngs = latlngs.filter(ll => Array.isArray(ll) && ll.length===2 && ll.every(Number.isFinite) && Math.abs(ll[0])<=90 && Math.abs(ll[1])<=180);
             if (latlngs.length < 2) { console.warn('Trecho inválido (poucos pontos):', t); done++; setStatus(done, total); return; }
             const line = L.polyline(latlngs, { color, weight: 5, opacity: 0.9, lineJoin: 'round' })
               .bindPopup('<b>' + rod + '</b><br>' + (
